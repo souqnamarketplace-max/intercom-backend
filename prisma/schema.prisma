@@ -1,0 +1,455 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum StaffRole {
+  platform_admin
+  owner_admin
+  owner_manager
+  owner_staff
+  @@map("staff_role")
+}
+
+enum DeviceType {
+  panel
+  pi_controller
+  @@map("device_type")
+}
+
+enum DeviceConnection {
+  ethernet
+  wifi
+  cellular
+  @@map("device_connection")
+}
+
+enum ResidentStatus {
+  active
+  suspended
+  deleted
+  @@map("resident_status")
+}
+
+enum FobStatus {
+  active
+  suspended
+  revoked
+  lost_stolen
+  @@map("fob_status")
+}
+
+enum KeyType {
+  single_use
+  recurring
+  delivery
+  @@map("key_type")
+}
+
+// QR: scanned at the panel camera (backend-signed JWT token, offline-verifiable).
+// PIN: entered on the panel keypad (short numeric code, hashed like card fobs
+// and delivery-authorization PINs) — this is how a resident-generated
+// "Delivery Pass" gets used, since carriers type a code rather than scan a phone.
+enum KeyAccessMethod {
+  qr
+  pin
+  @@map("key_access_method")
+}
+
+enum KeyStatus {
+  active
+  revoked
+  expired
+  @@map("key_status")
+}
+
+enum AuditEventType {
+  call_answered
+  call_missed
+  call_declined
+  unlock_app
+  unlock_pin
+  unlock_virtual_key
+  unlock_card_fob
+  unlock_admin_override
+  fire_alarm_triggered
+  device_offline
+  device_online
+  failed_pin_attempt
+  failed_fob_attempt
+  config_changed
+  @@map("audit_event_type")
+}
+
+model Owner {
+  id                    String    @id @default(uuid()) @db.Uuid
+  name                  String
+  flatFeeAmount         Decimal   @default(0) @map("flat_fee_amount") @db.Decimal(10, 2)
+  perSiteRate           Decimal   @default(0) @map("per_site_rate") @db.Decimal(10, 2)
+  perUnitRate           Decimal   @default(0) @map("per_unit_rate") @db.Decimal(10, 2)
+  perResidentRate       Decimal   @default(0) @map("per_resident_rate") @db.Decimal(10, 2)
+  billingCycle          String    @default("monthly") @map("billing_cycle")
+  currency              String    @default("USD")
+  subscriptionStatus    String    @default("trial") @map("subscription_status")
+  trialStartDate        DateTime? @map("trial_start_date") @db.Date
+  trialEndDate          DateTime? @map("trial_end_date") @db.Date
+  subscriptionStartDate DateTime? @map("subscription_start_date") @db.Date
+  subscriptionEndDate   DateTime? @map("subscription_end_date") @db.Date
+  nextBillingDate       DateTime? @map("next_billing_date") @db.Date
+  gracePeriodDays       Int       @default(7) @map("grace_period_days")
+  demoMode              Boolean   @default(false) @map("demo_mode")
+  createdAt             DateTime  @default(now()) @map("created_at")
+  updatedAt             DateTime  @updatedAt @map("updated_at")
+
+  staffAccounts  StaffAccount[]
+  sites          Site[]
+  partnerApiKeys PartnerApiKey[]
+
+  @@map("owners")
+}
+
+model StaffAccount {
+  id                 String    @id @default(uuid()) @db.Uuid
+  ownerId            String?   @map("owner_id") @db.Uuid
+  email              String    @unique
+  passwordHash       String    @map("password_hash")
+  role               StaffRole
+  identityProviderId String?   @map("identity_provider_id")
+  createdAt          DateTime  @default(now()) @map("created_at")
+
+  owner Owner? @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+
+  @@map("staff_accounts")
+}
+
+model Site {
+  id                   String   @id @default(uuid()) @db.Uuid
+  ownerId              String   @map("owner_id") @db.Uuid
+  name                 String
+  address              String?
+  latitude             Float?
+  longitude            Float?
+  timezone             String   @default("UTC")
+  brandingLogoUrl      String?  @map("branding_logo_url")
+  buildingInfo         String?  @map("building_info") @db.Text
+  frontDeskResidentId  String?  @map("front_desk_resident_id") @db.Uuid
+  frontDeskLabel       String   @default("Front Desk") @map("front_desk_label")
+  customButtonLabels   Json     @default("{}") @map("custom_button_labels")
+  panelSettingsPin     String   @default("1234") @map("panel_settings_pin")
+  directoryPrivacyMode Boolean  @default(false) @map("directory_privacy_mode")
+  fireAlarmRelayMap    Json     @default("[]") @map("fire_alarm_relay_map")
+  // The panel's Security tile is a placeholder (no real multi-camera
+  // backend yet) — hidden by default, dashboard-togglable so a site with
+  // real camera integration can turn it on without a code change.
+  securityTileEnabled  Boolean  @default(false) @map("security_tile_enabled")
+  // Uploaded (not linked) screensaver for the panel's idle screen -
+  // stored as a data URL for this testing phase, same as branding logo
+  // and message photos already are. A real deployment should move this to
+  // real blob storage (S3/Cloudinary) instead, especially for video, which
+  // can get large - flagged honestly rather than pretending this scales.
+  screensaverType      String?  @map("screensaver_type") // 'image' | 'video'
+  screensaverUrl       String?  @db.Text @map("screensaver_url")
+  // How long the panel sits idle (no touch, no detected motion) before the
+  // screensaver takes over - previously screensaver visibility was purely
+  // motion-reactive with no configurable delay at all.
+  screensaverDelaySeconds Int   @default(20) @map("screensaver_delay_seconds")
+  // Reusable, regenerable code (like a Wi-Fi password, not one-time) that
+  // lets any number of panels/Pis pair with this site. Each device still
+  // self-identifies which entry point it is after entering this — the code
+  // only proves "this device belongs to this site."
+  panelSetupCode       String?  @unique @map("panel_setup_code")
+  createdAt            DateTime @default(now()) @map("created_at")
+  updatedAt            DateTime @updatedAt @map("updated_at")
+
+  owner                  Owner                   @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  frontDeskResident      Resident?               @relation(fields: [frontDeskResidentId], references: [id], onDelete: SetNull)
+  entryPoints            EntryPoint[]
+  units                  Unit[]
+  zones                  Zone[]
+  cardFobs               CardFob[]
+  virtualKeys            VirtualKey[]
+  staticQrCodes          StaticQrCode[]
+  auditEvents            AuditEvent[]
+  siteIntegrations       SiteIntegration[]
+  deliveryAuthorizations DeliveryAuthorization[]
+  residentMessages       ResidentMessage[]
+
+  @@map("sites")
+}
+
+model EntryPoint {
+  id            String   @id @default(uuid()) @db.Uuid
+  siteId        String   @map("site_id") @db.Uuid
+  name          String
+  customButtons Json     @default("[]") @map("custom_buttons")
+  // Shared spaces (e.g. common parking, mail room) that every resident
+  // should see regardless of which zone their unit is in — avoids needing
+  // an explicit ZoneEntryPoint row per zone for something everyone can use.
+  openToAllZones Boolean @default(false) @map("open_to_all_zones")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  site          Site           @relation(fields: [siteId], references: [id], onDelete: Cascade)
+  devices       Device[]
+  staticQrCodes StaticQrCode[]
+  auditEvents   AuditEvent[]
+  zoneAccess    ZoneEntryPoint[]
+
+  @@map("entry_points")
+}
+
+model Device {
+  id              String           @id @default(uuid()) @db.Uuid
+  entryPointId    String           @map("entry_point_id") @db.Uuid
+  deviceType      DeviceType       @map("device_type")
+  serialNumber    String           @unique @map("serial_number")
+  publicKey       String?          @map("public_key")
+  connectionType  DeviceConnection @default(ethernet) @map("connection_type")
+  failoverEnabled Boolean          @default(false) @map("failover_enabled")
+  firmwareVersion String?          @map("firmware_version")
+  status          String           @default("offline")
+  lastHeartbeatAt DateTime?        @map("last_heartbeat_at")
+  // One-time code a physical panel exchanges for its own identity
+  // (siteId + entryPointId + deviceId) at first launch. Lives on the
+  // Device, not the Site, because a site can have multiple panels (one per
+  // entry point) that each need independent provisioning, monitoring, and
+  // revocation — a site-level code couldn't tell two panels apart.
+  setupCode       String?          @unique @map("setup_code")
+  provisionedAt   DateTime?        @map("provisioned_at")
+  createdAt       DateTime         @default(now()) @map("created_at")
+
+  entryPoint  EntryPoint   @relation(fields: [entryPointId], references: [id], onDelete: Cascade)
+  auditEvents AuditEvent[]
+
+  @@unique([entryPointId, deviceType])
+  @@map("devices")
+}
+
+model Unit {
+  id         String   @id @default(uuid()) @db.Uuid
+  siteId     String   @map("site_id") @db.Uuid
+  zoneId     String?  @map("zone_id") @db.Uuid
+  unitNumber String   @map("unit_number")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  site        Site         @relation(fields: [siteId], references: [id], onDelete: Cascade)
+  zone        Zone?        @relation(fields: [zoneId], references: [id], onDelete: SetNull)
+  residents   Resident[]
+  virtualKeys VirtualKey[]
+  auditEvents AuditEvent[]
+
+  @@unique([siteId, unitNumber])
+  @@map("units")
+}
+
+// Lightweight grouping WITHIN a site, for delivery/access scoping and
+// reporting only — distinct from Entry Points, which are physical doors.
+// A unit optionally belongs to one zone. Does not replace Entry Points.
+model Zone {
+  id        String   @id @default(uuid()) @db.Uuid
+  siteId    String   @map("site_id") @db.Uuid
+  name      String
+  createdAt DateTime @default(now()) @map("created_at")
+
+  site       Site             @relation(fields: [siteId], references: [id], onDelete: Cascade)
+  units      Unit[]
+  entryPoints ZoneEntryPoint[]
+
+  @@unique([siteId, name])
+  @@map("zones")
+}
+
+// Which doors a zone's residents can access, beyond the entry points
+// already open to everyone (EntryPoint.openToAllZones). Many-to-many since
+// a zone might need more than one door and a door might serve more than
+// one zone (e.g. two adjacent buildings sharing a side entrance).
+model ZoneEntryPoint {
+  zoneId       String @map("zone_id") @db.Uuid
+  entryPointId String @map("entry_point_id") @db.Uuid
+
+  zone       Zone       @relation(fields: [zoneId], references: [id], onDelete: Cascade)
+  entryPoint EntryPoint @relation(fields: [entryPointId], references: [id], onDelete: Cascade)
+
+  @@id([zoneId, entryPointId])
+  @@map("zone_entry_points")
+}
+
+// Distinct from VirtualKey: a fixed, carrier-scoped PIN with a recurring
+// delivery time window, not a single resident-issued expiring link.
+model DeliveryAuthorization {
+  id          String   @id @default(uuid()) @db.Uuid
+  siteId      String   @map("site_id") @db.Uuid
+  carrierName String   @map("carrier_name")
+  pinHash     String   @map("pin_hash")
+  timeWindow  Json     @default("{}") @map("time_window")
+  active      Boolean  @default(true)
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  site Site @relation(fields: [siteId], references: [id], onDelete: Cascade)
+
+  @@unique([siteId, carrierName])
+  @@map("delivery_authorizations")
+}
+
+// A one-way message sent from the panel (visitor without a call, e.g. "I'm
+// leaving your package with the neighbor") to a specific resident's app.
+// Distinct from a call — no live connection, just a stored note the resident
+// sees next time they open the app.
+model ResidentMessage {
+  id         String    @id @default(uuid()) @db.Uuid
+  residentId String    @map("resident_id") @db.Uuid
+  siteId     String    @map("site_id") @db.Uuid
+  body       String    @db.Text
+  // Stored as a data URL for this testing phase (same as audit event photos
+  // aren't on real blob storage yet either) - a real deployment would
+  // upload to S3/Cloudinary/etc and store a URL here instead.
+  photoUrl   String?   @db.Text @map("photo_url")
+  readAt     DateTime? @map("read_at")
+  createdAt  DateTime  @default(now()) @map("created_at")
+
+  resident Resident @relation(fields: [residentId], references: [id], onDelete: Cascade)
+  site     Site     @relation(fields: [siteId], references: [id], onDelete: Cascade)
+
+  @@map("resident_messages")
+}
+// another access-control system) call INTO our platform. Reverse direction
+// of SiteIntegration/IntegrationAdapter, which is us calling OUT to them.
+// Only the hash is stored; the plaintext key is shown once at creation.
+model PartnerApiKey {
+  id         String    @id @default(uuid()) @db.Uuid
+  ownerId    String    @map("owner_id") @db.Uuid
+  name       String
+  keyPrefix  String    @map("key_prefix")
+  keyHash    String    @unique @map("key_hash")
+  scopes     String[]
+  lastUsedAt DateTime? @map("last_used_at")
+  revokedAt  DateTime? @map("revoked_at")
+  createdAt  DateTime  @default(now()) @map("created_at")
+
+  owner Owner @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+
+  @@map("partner_api_keys")
+}
+
+model Resident {
+  id                   String         @id @default(uuid()) @db.Uuid
+  unitId               String         @map("unit_id") @db.Uuid
+  name                 String
+  email                String?
+  phone                String?
+  status               ResidentStatus @default(active)
+  directoryVisible     Boolean        @default(true) @map("directory_visible")
+  notificationsEnabled Boolean        @default(true) @map("notifications_enabled")
+  pinHash              String?        @map("pin_hash")
+  inviteCode           String?        @unique @map("invite_code")
+  appAccountCreated    Boolean        @default(false) @map("app_account_created")
+  otpCode              String?        @map("otp_code")
+  otpExpiresAt         DateTime?      @map("otp_expires_at")
+  createdAt            DateTime       @default(now()) @map("created_at")
+  updatedAt            DateTime       @updatedAt @map("updated_at")
+
+  unit              Unit         @relation(fields: [unitId], references: [id], onDelete: Cascade)
+  cardFobs          CardFob[]
+  issuedVirtualKeys VirtualKey[]
+  auditEvents       AuditEvent[]
+  frontDeskForSites Site[]
+  messages          ResidentMessage[]
+
+  @@map("residents")
+}
+
+model CardFob {
+  id           String    @id @default(uuid()) @db.Uuid
+  residentId   String?   @map("resident_id") @db.Uuid
+  siteId       String    @map("site_id") @db.Uuid
+  label        String?
+  hashedCardId String    @map("hashed_card_id")
+  status       FobStatus @default(active)
+  createdAt    DateTime  @default(now()) @map("created_at")
+
+  resident Resident? @relation(fields: [residentId], references: [id], onDelete: SetNull)
+  site     Site      @relation(fields: [siteId], references: [id], onDelete: Cascade)
+
+  @@map("card_fobs")
+}
+
+model VirtualKey {
+  id                 String    @id @default(uuid()) @db.Uuid
+  issuedByResidentId String?   @map("issued_by_resident_id") @db.Uuid
+  unitId             String    @map("unit_id") @db.Uuid
+  siteId             String    @map("site_id") @db.Uuid
+  recipientName      String    @map("recipient_name")
+  recipientContact   String?   @map("recipient_contact")
+  keyType            KeyType   @map("key_type")
+  accessMethod       KeyAccessMethod @default(qr) @map("access_method")
+  schedule           Json?
+  // Window start — pairs with expiresAt for "Custom Duration" passes and
+  // recurring windows. Null means "active immediately," matching Full-Day
+  // Use / recurring-without-a-start-date presets.
+  activatesAt        DateTime? @map("activates_at")
+  expiresAt          DateTime? @map("expires_at")
+  status             KeyStatus @default(active)
+  signedToken        String    @default("") @map("signed_token")
+  shortCodeHash      String?   @map("short_code_hash")
+  createdAt          DateTime  @default(now()) @map("created_at")
+
+  issuedBy Resident? @relation(fields: [issuedByResidentId], references: [id], onDelete: SetNull)
+  unit     Unit      @relation(fields: [unitId], references: [id], onDelete: Cascade)
+  site     Site      @relation(fields: [siteId], references: [id], onDelete: Cascade)
+
+  @@map("virtual_keys")
+}
+
+model StaticQrCode {
+  id            String    @id @default(uuid()) @db.Uuid
+  siteId        String    @map("site_id") @db.Uuid
+  entryPointId  String?   @map("entry_point_id") @db.Uuid
+  opaqueToken   String    @unique @map("opaque_token")
+  createdAt     DateTime  @default(now()) @map("created_at")
+  regeneratedAt DateTime? @map("regenerated_at")
+
+  site       Site        @relation(fields: [siteId], references: [id], onDelete: Cascade)
+  entryPoint EntryPoint? @relation(fields: [entryPointId], references: [id], onDelete: Cascade)
+
+  @@map("static_qr_codes")
+}
+
+model AuditEvent {
+  id           String         @id @default(uuid()) @db.Uuid
+  siteId       String         @map("site_id") @db.Uuid
+  entryPointId String?        @map("entry_point_id") @db.Uuid
+  deviceId     String?        @map("device_id") @db.Uuid
+  unitId       String?        @map("unit_id") @db.Uuid
+  residentId   String?        @map("resident_id") @db.Uuid
+  eventType    AuditEventType @map("event_type")
+  method       String?
+  result       String
+  photoUrl     String?        @map("photo_url")
+  metadata     Json           @default("{}")
+  createdAt    DateTime       @default(now()) @map("created_at")
+
+  site       Site        @relation(fields: [siteId], references: [id], onDelete: Cascade)
+  entryPoint EntryPoint? @relation(fields: [entryPointId], references: [id], onDelete: SetNull)
+  device     Device?     @relation(fields: [deviceId], references: [id], onDelete: SetNull)
+  unit       Unit?       @relation(fields: [unitId], references: [id], onDelete: SetNull)
+  resident   Resident?   @relation(fields: [residentId], references: [id], onDelete: SetNull)
+
+  @@index([siteId, createdAt])
+  @@map("audit_events")
+}
+
+model SiteIntegration {
+  id        String   @id @default(uuid()) @db.Uuid
+  siteId    String   @map("site_id") @db.Uuid
+  type      String
+  config    Json     @default("{}")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  site Site @relation(fields: [siteId], references: [id], onDelete: Cascade)
+
+  @@map("site_integrations")
+}
